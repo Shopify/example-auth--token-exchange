@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import {fileURLToPath} from 'url';
+import jwt from 'jsonwebtoken';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -12,9 +13,27 @@ app.use(express.static(path.join(__dirname, 'public')));
 const {SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET, SHOPIFY_SHOP} = process.env;
 // [END token-exchange.config]
 
+// [START token-exchange.validate-id-token]
+function validateIdToken(idToken) {
+  const payload = jwt.verify(idToken, SHOPIFY_CLIENT_SECRET, {
+    algorithms: ['HS256'],
+    audience: SHOPIFY_CLIENT_ID,
+  });
+
+  const issuerHost = new URL(payload.iss).hostname;
+  const destHost = new URL(payload.dest).hostname;
+  if (issuerHost !== destHost) {
+    throw new Error('Token issuer and destination do not match');
+  }
+
+  return payload;
+}
+// [END token-exchange.validate-id-token]
+
 // [START token-exchange.exchange-offline]
 app.post('/exchange/offline', async (req, res) => {
   const idToken = req.headers.authorization?.replace('Bearer ', '');
+  validateIdToken(idToken);
 
   const response = await fetch(
     `https://${SHOPIFY_SHOP}.myshopify.com/admin/oauth/access_token`,
@@ -41,6 +60,7 @@ app.post('/exchange/offline', async (req, res) => {
 // [START token-exchange.exchange-online]
 app.post('/exchange/online', async (req, res) => {
   const idToken = req.headers.authorization?.replace('Bearer ', '');
+  validateIdToken(idToken);
 
   const response = await fetch(
     `https://${SHOPIFY_SHOP}.myshopify.com/admin/oauth/access_token`,
