@@ -37,7 +37,7 @@ curl -X POST \
 ACCESS_TOKEN="your-access-token"
 
 curl -X POST \
-  "https://${SHOP}.myshopify.com/admin/api/2025-01/graphql.json" \
+  "https://${SHOP}.myshopify.com/admin/api/2026-04/graphql.json" \
   -H 'Content-Type: application/json' \
   -H "X-Shopify-Access-Token: ${ACCESS_TOKEN}" \
   -d '{"query": "{ shop { name } }"}'
