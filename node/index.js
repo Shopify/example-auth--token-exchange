@@ -33,7 +33,11 @@ function validateIdToken(idToken) {
 // [START token-exchange.exchange-offline]
 app.post('/exchange/offline', async (req, res) => {
   const idToken = req.headers.authorization?.replace('Bearer ', '');
-  validateIdToken(idToken);
+  try {
+    validateIdToken(idToken);
+  } catch {
+    return res.status(401).json({error: 'Invalid ID token'});
+  }
 
   const response = await fetch(
     `https://${SHOPIFY_SHOP}.myshopify.com/admin/oauth/access_token`,
@@ -60,7 +64,11 @@ app.post('/exchange/offline', async (req, res) => {
 // [START token-exchange.exchange-online]
 app.post('/exchange/online', async (req, res) => {
   const idToken = req.headers.authorization?.replace('Bearer ', '');
-  validateIdToken(idToken);
+  try {
+    validateIdToken(idToken);
+  } catch {
+    return res.status(401).json({error: 'Invalid ID token'});
+  }
 
   const response = await fetch(
     `https://${SHOPIFY_SHOP}.myshopify.com/admin/oauth/access_token`,
