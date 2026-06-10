@@ -96,7 +96,7 @@ app.get('/api/shop', async (req, res) => {
   const accessToken = req.headers['x-access-token'];
 
   const response = await fetch(
-    `https://${SHOPIFY_SHOP}.myshopify.com/admin/api/2025-01/graphql.json`,
+    `https://${SHOPIFY_SHOP}.myshopify.com/admin/api/2026-04/graphql.json`,
     {
       method: 'POST',
       headers: {
