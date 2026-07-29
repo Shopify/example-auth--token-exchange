@@ -1,14 +1,24 @@
 {
-  "name": "node",
+  "name": "get-access-tokens-without-template-node",
   "version": "1.0.0",
+  "description": "Node.js sample for getting Shopify access tokens via token exchange, for embedded apps not using the app template.",
+  "type": "module",
   "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+  "engines": {
+    "node": ">=20"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
+  "scripts": {
+    "start": "node index.js",
+    "test": "echo \"No tests specified\""
+  },
+  "keywords": [
+    "shopify",
+    "token-exchange",
+    "oauth",
+    "access-token"
+  ],
+  "author": "Shopify",
+  "license": "MIT",
   "dependencies": {
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
