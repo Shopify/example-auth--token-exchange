@@ -1,5 +1,5 @@
 {
-  "name": "get-access-tokens-without-template-node",
+  "name": "node",
   "version": "1.0.0",
   "description": "Node.js sample for getting Shopify access tokens via token exchange, for embedded apps not using the app template.",
   "type": "module",
