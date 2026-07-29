@@ -3,6 +3,7 @@ import express from 'express';
 import path from 'path';
 import {fileURLToPath} from 'url';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -10,7 +11,8 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 // [START token-exchange.config]
-const {SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET, SHOPIFY_SHOP} = process.env;
+const {SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET, SHOPIFY_SHOP, REFRESH_TASK_SECRET} =
+  process.env;
 // [END token-exchange.config]
 
 // [START token-exchange.validate-id-token]
@@ -29,6 +31,20 @@ function validateIdToken(idToken) {
   return payload;
 }
 // [END token-exchange.validate-id-token]
+
+// [START token-exchange.authorize-task]
+// Background callers (webhooks, scheduled jobs) have no session to produce an
+// ID token, so they authenticate with a shared secret that only your own
+// backend and schedulers know. Sent as the `X-Refresh-Secret` header.
+function isAuthorizedTask(req) {
+  const provided = req.get('X-Refresh-Secret') ?? '';
+  if (!REFRESH_TASK_SECRET || !provided) return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(REFRESH_TASK_SECRET);
+  // timingSafeEqual throws on length mismatch, so check length first.
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+// [END token-exchange.authorize-task]
 
 // [START token-exchange.exchange-offline]
 app.post('/exchange/offline', async (req, res) => {
@@ -113,7 +129,17 @@ app.get('/api/shop', async (req, res) => {
 
 // [START token-exchange.refresh]
 app.post('/refresh', async (req, res) => {
+  // This endpoint mints a new access token, so authenticate the caller before
+  // doing anything. Background callers can't provide an ID token, so they send
+  // the shared secret instead.
+  if (!isAuthorizedTask(req)) {
+    return res.status(401).json({error: 'Unauthorized'});
+  }
+
   const {refresh_token} = req.body;
+  if (!refresh_token) {
+    return res.status(400).json({error: 'Missing refresh_token'});
+  }
 
   const response = await fetch(
     `https://${SHOPIFY_SHOP}.myshopify.com/admin/oauth/access_token`,
