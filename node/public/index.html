@@ -1,22 +1,10 @@
 <!DOCTYPE html>
 <html>
   <head>
+    <meta name="shopify-api-key" content="%SHOPIFY_API_KEY%" />
     <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
   </head>
   <body>
-    <script type="module">
-      // [START token-exchange.get-id-token]
-      const idToken = await shopify.idToken();
-      // [END token-exchange.get-id-token]
-
-      // [START token-exchange.send-to-backend]
-      const response = await fetch('/exchange/offline', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${idToken}`,
-        },
-      });
-      // [END token-exchange.send-to-backend]
-    </script>
+    <script type="module" src="/app.js"></script>
   </body>
 </html>
