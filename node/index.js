@@ -129,8 +129,10 @@ app.post('/exchange/online', async (req, res) => {
 
   const {access_token, scope} = await response.json();
 
-  // Store token server-side — never send it to the browser
-  tokenStore[`${shop}:online`] = {access_token};
+  // Online tokens are scoped to the staff member who authorized them, so key
+  // them by user (the ID token's `sub`) — not just by shop. Storing under a
+  // shop-only key would let one staff member's token overwrite another's.
+  tokenStore[`${shop}:online:${payload.sub}`] = {access_token};
 
   res.json({scope});
 });
@@ -149,7 +151,10 @@ app.get('/api/shop', async (req, res) => {
   }
 
   const shop = new URL(payload.dest).hostname;
-  const stored = tokenStore[shop] ?? tokenStore[`${shop}:online`];
+  // Prefer this staff member's online token so the request runs with their
+  // permissions; fall back to the shop-wide offline token for shop-level access.
+  const stored =
+    tokenStore[`${shop}:online:${payload.sub}`] ?? tokenStore[shop];
   if (!stored) return res.status(401).json({error: 'Not authenticated'});
 
   const response = await fetch(
