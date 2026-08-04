@@ -54,6 +54,8 @@ app.post('/exchange/offline', async (req, res) => {
   try {
     payload = validateIdToken(idToken);
   } catch {
+    // Signal App Bridge to fetch a fresh ID token and retry this request once.
+    res.set('X-Shopify-Retry-Invalid-Session-Request', '1');
     return res.status(401).json({error: 'Invalid ID token'});
   }
 
