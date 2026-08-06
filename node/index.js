@@ -32,11 +32,12 @@ app.use(express.static(path.join(__dirname, 'public')));
 const tokenStore = {};
 
 // A valid expiring-token response includes expires_in (seconds until the access
-// token expires). Guard against a malformed response: treat a missing value as
-// already-expired so the next request refreshes, rather than storing NaN — which
-// compares false everywhere and would silently disable refresh.
+// token expires). Return null when it's absent or non-positive: treat the token
+// as non-expiring and never refresh it. Storing Date.now() instead would make
+// the next request refresh a token that has no refresh_token — a permanent 401.
 function expiresAtFrom(expiresIn) {
-  return Date.now() + (Number(expiresIn) || 0) * 1000;
+  const seconds = Number(expiresIn);
+  return seconds > 0 ? Date.now() + seconds * 1000 : null;
 }
 
 // [START token-exchange.validate-id-token]
@@ -244,7 +245,9 @@ app.get('/api/shop', async (req, res) => {
     if (offline?.expires_at && Date.now() >= offline.expires_at - 60 * 1000) {
       const result = await refreshOfflineToken(shop);
       if (result === 'reauthorize') {
-        res.set('X-Shopify-Retry-Invalid-Session-Request', '1');
+        // No retry header here: the offline refresh token is dead, and a fresh
+        // ID token can't revive it. The client must re-run /exchange/offline
+        // (or reinstall) rather than retry this request into another 401.
         return res.status(401).json({error: 'reauthenticate'});
       }
       if (result === 'retry') {
