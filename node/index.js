@@ -4,20 +4,10 @@ import path from 'path';
 import {fileURLToPath} from 'url';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
-import {readFileSync} from 'fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.use(express.json());
-
-// Inject the client ID (App Bridge API key) into index.html before serving it.
-// express.static would return the file verbatim, leaving the placeholder in place.
-app.get(['/', '/index.html'], (req, res) => {
-  const html = readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8')
-    .replace('%SHOPIFY_API_KEY%', process.env.SHOPIFY_CLIENT_ID);
-  res.type('html').send(html);
-});
-
 app.use(express.static(path.join(__dirname, 'public')));
 
 // [START token-exchange.config]
@@ -137,16 +127,12 @@ app.post('/exchange/online', async (req, res) => {
     return res.status(502).json({error: 'Token exchange failed'});
   }
 
-  const {access_token, scope, expires_in} = await response.json();
+  const {access_token, scope} = await response.json();
 
   // Online tokens are scoped to the staff member who authorized them, so key
   // them by user (the ID token's `sub`) — not just by shop. Storing under a
   // shop-only key would let one staff member's token overwrite another's.
-  // Track when it expires so we don't keep sending a dead token.
-  tokenStore[`${shop}:online:${payload.sub}`] = {
-    access_token,
-    expires_at: Date.now() + expires_in * 1000,
-  };
+  tokenStore[`${shop}:online:${payload.sub}`] = {access_token};
 
   res.json({scope});
 });
@@ -165,17 +151,10 @@ app.get('/api/shop', async (req, res) => {
   }
 
   const shop = new URL(payload.dest).hostname;
-
-  // Drop an expired online token so we fall back instead of sending a dead one.
-  const onlineKey = `${shop}:online:${payload.sub}`;
-  const online = tokenStore[onlineKey];
-  if (online?.expires_at && online.expires_at <= Date.now()) {
-    delete tokenStore[onlineKey];
-  }
-
   // Prefer this staff member's online token so the request runs with their
   // permissions; fall back to the shop-wide offline token for shop-level access.
-  const stored = tokenStore[onlineKey] ?? tokenStore[shop];
+  const stored =
+    tokenStore[`${shop}:online:${payload.sub}`] ?? tokenStore[shop];
   if (!stored) return res.status(401).json({error: 'Not authenticated'});
 
   const response = await fetch(
@@ -189,14 +168,6 @@ app.get('/api/shop', async (req, res) => {
       body: JSON.stringify({query: '{ shop { name } }'}),
     },
   );
-
-  // If Shopify rejects the token, evict it and ask the client to retry with a
-  // fresh ID token rather than looping on a bad credential.
-  if (response.status === 401) {
-    delete tokenStore[onlineKey];
-    res.set('X-Shopify-Retry-Invalid-Session-Request', '1');
-    return res.status(401).json({error: 'Token rejected'});
-  }
 
   res.json(await response.json());
 });
@@ -233,6 +204,16 @@ app.post('/refresh', async (req, res) => {
     },
   );
 
+  // A 401 is terminal: the refresh token is expired, revoked, replayed outside
+  // the retry window, or the app was uninstalled. Stop retrying, drop the dead
+  // token, and re-authenticate the next time a merchant opens the app.
+  if (response.status === 401) {
+    delete tokenStore[shop];
+    return res.status(401).json({error: 'reauthenticate'});
+  }
+
+  // Other failures (network, 5xx, 429) are transient — safe to retry with the
+  // same refresh token.
   if (!response.ok) {
     return res.status(502).json({error: 'Token refresh failed'});
   }
