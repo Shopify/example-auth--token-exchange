@@ -141,6 +141,15 @@ app.post('/exchange/offline', async (req, res) => {
     },
   );
 
+  // Shopify returns 400 when the ID token is expired or otherwise invalid. ID
+  // tokens live about a minute, so that's a routine client condition, not a server
+  // fault — answer it like a local validation failure so App Bridge fetches a fresh
+  // token and retries. Returning 502 would say the opposite: don't bother retrying.
+  if (response.status === 400) {
+    res.set('X-Shopify-Retry-Invalid-Session-Request', '1');
+    return res.status(401).json({error: 'Invalid ID token'});
+  }
+
   if (!response.ok) {
     return res.status(502).json({error: 'Token exchange failed'});
   }
@@ -189,6 +198,13 @@ app.post('/exchange/online', async (req, res) => {
       }),
     },
   );
+
+  // Same as the offline route: a 400 means the ID token is stale, which a fresh
+  // one fixes. Don't dress a retryable condition up as a server error.
+  if (response.status === 400) {
+    res.set('X-Shopify-Retry-Invalid-Session-Request', '1');
+    return res.status(401).json({error: 'Invalid ID token'});
+  }
 
   if (!response.ok) {
     return res.status(502).json({error: 'Token exchange failed'});

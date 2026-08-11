@@ -156,6 +156,15 @@ def exchange_offline():
         timeout=30,
     )
 
+    # Shopify returns 400 when the ID token is expired or otherwise invalid. ID
+    # tokens live about a minute, so that's a routine client condition, not a server
+    # fault — answer it like a local validation failure so App Bridge fetches a fresh
+    # token and retries. Returning 502 would say the opposite: don't bother retrying.
+    if response.status_code == 400:
+        error = jsonify({'error': 'Invalid ID token'})
+        error.headers['X-Shopify-Retry-Invalid-Session-Request'] = '1'
+        return error, 401
+
     if not response.ok:
         return jsonify({'error': 'Token exchange failed'}), 502
 
@@ -201,6 +210,13 @@ def exchange_online():
         },
         timeout=30,
     )
+
+    # Same as the offline route: a 400 means the ID token is stale, which a fresh
+    # one fixes. Don't dress a retryable condition up as a server error.
+    if response.status_code == 400:
+        error = jsonify({'error': 'Invalid ID token'})
+        error.headers['X-Shopify-Retry-Invalid-Session-Request'] = '1'
+        return error, 401
 
     if not response.ok:
         return jsonify({'error': 'Token exchange failed'}), 502
