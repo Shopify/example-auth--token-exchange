@@ -7,11 +7,17 @@ Tutorial for getting an access token for apps not using the Shopify app template
 ## Languages
 
 - `node/` — Node.js example
+- `python/` — Python example (Flask)
 - `curl/` — cURL/Bash example
+
+The frontend in `public/` is shared. App Bridge runs in the browser, so
+`shopify.idToken()` is JavaScript whatever language your backend is written in.
 
 ## Setup
 
-The steps below set up the Node.js example. The cURL example needs no install — edit the values at the top of `curl/example.sh` and run it.
+The steps below set up a server. The cURL example needs no install — edit the values at the top of `curl/example.sh` and run it.
+
+**Node.js**
 
 1. `cd node`
 2. Copy `.env.example` to `.env` and add your credentials
@@ -19,9 +25,23 @@ The steps below set up the Node.js example. The cURL example needs no install �
 4. Start the server with `npm start`
 5. Open the app in your dev store
 
+**Python** (3.9 or later)
+
+1. `cd python`
+2. Copy `.env.example` to `.env` and add your credentials
+3. Create a virtual environment and install dependencies:
+   ```sh
+   python3 -m venv .venv && source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
+4. Start the server with `python main.py`
+5. Open the app in your dev store
+
+Both servers listen on port 3000 and serve the same frontend from `public/`, so run one at a time.
+
 ## Environment variables
 
-Set these in `node/.env`:
+Set these in `node/.env` or `python/.env`:
 
 - `SHOPIFY_CLIENT_ID` — your app's client ID from the Dev Dashboard
 - `SHOPIFY_CLIENT_SECRET` — your app's client secret from the Dev Dashboard

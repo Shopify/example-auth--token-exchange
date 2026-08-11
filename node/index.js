@@ -20,13 +20,13 @@ const {SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET, REFRESH_TASK_SECRET} =
 // %SHOPIFY_API_KEY% placeholder in the page — so App Bridge never initializes.
 app.get(['/', '/index.html'], (req, res) => {
   const html = readFileSync(
-    path.join(__dirname, 'public', 'index.html'),
+    path.join(__dirname, '..', 'public', 'index.html'),
     'utf8',
   ).replace('%SHOPIFY_API_KEY%', SHOPIFY_CLIENT_ID);
   res.type('html').send(html);
 });
 
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, '..', 'public')));
 
 // In-memory token store (use a persistent session store in production)
 const tokenStore = {};
@@ -293,8 +293,11 @@ app.post('/refresh', async (req, res) => {
   }
 
   // Background callers supply the shop domain directly, since they have no
-  // active session to derive it from an ID token.
-  const {shop} = req.body;
+  // active session to derive it from an ID token. Defaulting to {} keeps a
+  // request with no body — or the wrong content type — on the documented 400
+  // path: Express 5 leaves req.body undefined when nothing was parsed, so
+  // destructuring it directly would throw and return 500.
+  const {shop} = req.body ?? {};
   if (!shop) return res.status(400).json({error: 'Missing shop'});
 
   // A 401 is terminal (expired, revoked, replayed outside the retry window, or
