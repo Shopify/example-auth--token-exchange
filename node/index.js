@@ -331,4 +331,15 @@ app.post('/refresh', async (req, res) => {
 });
 // [END token-exchange.refresh]
 
+// express.json() throws on a malformed body, and Express's default error handler
+// answers with an HTML page containing a stack trace and absolute file paths. This
+// is a JSON API, so answer in JSON. Match only parse failures: anything else should
+// keep surfacing loudly rather than be swallowed here.
+app.use((err, req, res, next) => {
+  if (err?.type === 'entity.parse.failed') {
+    return res.status(400).json({error: 'Malformed JSON body'});
+  }
+  next(err);
+});
+
 app.listen(3000, () => console.log('Server running on http://localhost:3000'));
