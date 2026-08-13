@@ -40,6 +40,28 @@ function expiresAtFrom(expiresIn) {
   return seconds > 0 ? Date.now() + seconds * 1000 : null;
 }
 
+// Node's fetch has no timeout, so a stalled connection to Shopify would hang a
+// request until the client gives up. Give every call a deadline, and tag transport
+// failures so callers can tell "Shopify said no" from "we never reached Shopify".
+// fetch rejects only on a transport failure or this timeout: every HTTP status,
+// including 5xx, resolves and is the caller's to handle.
+const SHOPIFY_TIMEOUT_MS = 30_000;
+
+class ShopifyUnreachable extends Error {}
+
+async function shopifyFetch(url, options) {
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: AbortSignal.timeout(SHOPIFY_TIMEOUT_MS),
+    });
+  } catch (cause) {
+    throw new ShopifyUnreachable(`Could not reach ${new URL(url).hostname}`, {
+      cause,
+    });
+  }
+}
+
 // [START token-exchange.validate-id-token]
 function validateIdToken(idToken) {
   const payload = jwt.verify(idToken, SHOPIFY_CLIENT_SECRET, {
@@ -80,9 +102,9 @@ async function refreshOfflineToken(shop) {
   const stored = tokenStore[shop];
   if (!stored?.refresh_token) return 'reauthorize';
 
-  const response = await fetch(
-    `https://${shop}/admin/oauth/access_token`,
-    {
+  let response;
+  try {
+    response = await shopifyFetch(`https://${shop}/admin/oauth/access_token`, {
       method: 'POST',
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},
       body: new URLSearchParams({
@@ -91,8 +113,14 @@ async function refreshOfflineToken(shop) {
         client_secret: SHOPIFY_CLIENT_SECRET,
         refresh_token: stored.refresh_token,
       }),
-    },
-  );
+    });
+  } catch (error) {
+    // Only a transport failure or timeout becomes 'retry': the request never
+    // reached Shopify, so the refresh token is untouched and a later attempt is
+    // safe. Anything else is a bug in this code — let it surface.
+    if (!(error instanceof ShopifyUnreachable)) throw error;
+    return 'retry';
+  }
 
   if (response.status === 401) {
     delete tokenStore[shop];
@@ -123,7 +151,7 @@ app.post('/exchange/offline', async (req, res) => {
 
   const shop = new URL(payload.dest).hostname;
 
-  const response = await fetch(
+  const response = await shopifyFetch(
     `https://${shop}/admin/oauth/access_token`,
     {
       method: 'POST',
@@ -182,7 +210,7 @@ app.post('/exchange/online', async (req, res) => {
 
   const shop = new URL(payload.dest).hostname;
 
-  const response = await fetch(
+  const response = await shopifyFetch(
     `https://${shop}/admin/oauth/access_token`,
     {
       method: 'POST',
@@ -275,7 +303,7 @@ app.get('/api/shop', async (req, res) => {
   const stored = tokenStore[onlineKey] ?? tokenStore[shop];
   if (!stored) return res.status(401).json({error: 'Not authenticated'});
 
-  const response = await fetch(
+  const response = await shopifyFetch(
     `https://${shop}/admin/api/2026-04/graphql.json`,
     {
       method: 'POST',
@@ -338,6 +366,12 @@ app.post('/refresh', async (req, res) => {
 app.use((err, req, res, next) => {
   if (err?.type === 'entity.parse.failed') {
     return res.status(400).json({error: 'Malformed JSON body'});
+  }
+  // The request never reached Shopify, so nothing was consumed and the caller can
+  // try again. 503 says that; the stack trace Express would otherwise return says
+  // the app is broken.
+  if (err instanceof ShopifyUnreachable) {
+    return res.status(503).json({error: 'Could not reach Shopify, try again'});
   }
   next(err);
 });
