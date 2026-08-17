@@ -68,6 +68,8 @@ class FakeShopify:
         self.minted_tokens_work = True
         # Status for the token endpoint. 400 means the ID token is stale.
         self.exchange_status = 200
+        # Status for the GraphQL Admin API when the token is accepted.
+        self.api_status = 200
         self.expires_in = 86_400
         self.minted = []
         self.calls = []
@@ -148,6 +150,10 @@ class FakeShopify:
             if token not in self.live_access_tokens:
                 return FakeResponse(
                     {'errors': [{'message': 'Invalid API key or access token'}]}, 401
+                )
+            if self.api_status != 200:
+                return FakeResponse(
+                    {'errors': [{'message': 'Throttled'}]}, self.api_status
                 )
             return FakeResponse({'data': {'shop': {'name': 'Test Shop'}}})
 
@@ -366,6 +372,22 @@ def dead_refresh_token():
     assert result.retry_header is None
     assert len(shopify.calls_of_type('graphql')) == 0, (
         'do not send a token the app already knows is dead'
+    )
+
+
+@scenario('an error status from Shopify is forwarded, not reported as success')
+def error_status_is_forwarded():
+    shop = fresh_shop()
+    assert call('POST', '/exchange/offline', shop).status == 200
+
+    # The token is fine; the request is throttled.
+    shopify.api_status = 429
+
+    result = call('GET', '/api/shop', shop)
+
+    assert result.status == 429, 'a throttled request is not a successful one'
+    assert len(shopify.calls_of_type('exchange')) == 1, (
+        'a rate limit is not a credential problem, so do not re-mint'
     )
 
 

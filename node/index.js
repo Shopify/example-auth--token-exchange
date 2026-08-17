@@ -407,7 +407,9 @@ app.get('/api/shop', async (req, res) => {
     }
   }
 
-  res.json(await response.json());
+  // Forward Shopify's status. Answering a rate limit or an outage with a 200 and
+  // an error body in it would tell the client the request succeeded.
+  res.status(response.status).json(await response.json());
 });
 // [END token-exchange.make-request]
 

@@ -391,7 +391,9 @@ def api_shop():
             token_store.pop(evict_key, None)
             return jsonify({'error': 'reauthenticate'}), 401
 
-    return jsonify(response.json())
+    # Forward Shopify's status. Answering a rate limit or an outage with a 200 and
+    # an error body in it would tell the client the request succeeded.
+    return jsonify(response.json()), response.status_code
 # [END token-exchange.make-request]
 
 

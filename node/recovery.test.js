@@ -48,6 +48,8 @@ const shopify = {
   mintedTokensWork: true,
   // Status for the token endpoint. 400 means the ID token is stale.
   exchangeStatus: 200,
+  // Status for the GraphQL Admin API when the token is accepted.
+  apiStatus: 200,
   expiresIn: 86_400,
   minted: [],
   calls: [],
@@ -58,6 +60,7 @@ function resetShopify() {
   shopify.liveRefreshTokens.clear();
   shopify.mintedTokensWork = true;
   shopify.exchangeStatus = 200;
+  shopify.apiStatus = 200;
   shopify.expiresIn = 86_400;
   shopify.minted = [];
   shopify.calls = [];
@@ -136,6 +139,9 @@ globalThis.fetch = async (url, options = {}) => {
     shopify.calls.push({type: 'graphql', token});
     if (!shopify.liveAccessTokens.has(token)) {
       return json({errors: [{message: 'Invalid API key or access token'}]}, 401);
+    }
+    if (shopify.apiStatus !== 200) {
+      return json({errors: [{message: 'Throttled'}]}, shopify.apiStatus);
     }
     return json({data: {shop: {name: 'Test Shop'}}});
   }
@@ -364,6 +370,26 @@ scenario(
       callsOfType('graphql').length,
       0,
       'do not send a token the app already knows is dead',
+    );
+  },
+);
+
+scenario(
+  'an error status from Shopify is forwarded, not reported as success',
+  async () => {
+    const shop = freshShop();
+    assert.equal((await call('POST', '/exchange/offline', shop)).status, 200);
+
+    // The token is fine; the request is throttled.
+    shopify.apiStatus = 429;
+
+    const result = await call('GET', '/api/shop', shop);
+
+    assert.equal(result.status, 429, 'a throttled request is not a successful one');
+    assert.equal(
+      callsOfType('exchange').length,
+      1,
+      'a rate limit is not a credential problem, so do not re-mint',
     );
   },
 );
