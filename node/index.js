@@ -254,6 +254,57 @@ app.post('/exchange/online', async (req, res) => {
 // [END token-exchange.exchange-online]
 
 // [START token-exchange.make-request]
+// Re-run token exchange for a token Shopify rejected, using the ID token that
+// came with the current request. Same request as /exchange/offline and
+// /exchange/online, minting whichever kind was rejected. The return value tells
+// the caller how to react:
+//   'minted'           — stored a new access token
+//   'invalid_id_token' — Shopify returned 400; the ID token is stale, and a fresh
+//                        one fixes it
+//   'failed'           — anything else; retrying with the same inputs won't help
+async function remintAccessToken({idToken, shop, sub, online}) {
+  const response = await shopifyFetch(
+    `https://${shop}/admin/oauth/access_token`,
+    {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: new URLSearchParams({
+        client_id: SHOPIFY_CLIENT_ID,
+        client_secret: SHOPIFY_CLIENT_SECRET,
+        grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+        subject_token: idToken,
+        subject_token_type: 'urn:ietf:params:oauth:token-type:id_token',
+        requested_token_type: online
+          ? 'urn:shopify:params:oauth:token-type:online-access-token'
+          : 'urn:shopify:params:oauth:token-type:offline-access-token',
+        // `expiring` only applies to offline tokens. An online token already
+        // expires with the staff member's session.
+        ...(online ? {} : {expiring: '1'}),
+      }),
+    },
+  );
+
+  if (response.status === 400) return 'invalid_id_token';
+  if (!response.ok) return 'failed';
+
+  const {access_token, refresh_token, expires_in} = await response.json();
+
+  if (online) {
+    tokenStore[`${shop}:online:${sub}`] = {
+      access_token,
+      expires_at: expiresAtFrom(expires_in),
+    };
+  } else {
+    tokenStore[shop] = {
+      access_token,
+      refresh_token,
+      expires_at: expiresAtFrom(expires_in),
+    };
+  }
+
+  return 'minted';
+}
+
 app.get('/api/shop', async (req, res) => {
   const idToken = req.headers.authorization?.replace('Bearer ', '');
   let payload;
@@ -303,24 +354,57 @@ app.get('/api/shop', async (req, res) => {
   const stored = tokenStore[onlineKey] ?? tokenStore[shop];
   if (!stored) return res.status(401).json({error: 'Not authenticated'});
 
-  const response = await shopifyFetch(
-    `https://${shop}/admin/api/2026-04/graphql.json`,
-    {
+  const callAdminApi = (accessToken) =>
+    shopifyFetch(`https://${shop}/admin/api/2026-04/graphql.json`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Shopify-Access-Token': stored.access_token,
+        'X-Shopify-Access-Token': accessToken,
       },
       body: JSON.stringify({query: '{ shop { name } }'}),
-    },
-  );
+    });
 
-  // If Shopify rejects the token, evict the one we used and ask the client to
-  // retry with a fresh ID token rather than looping on a bad credential.
+  let response = await callAdminApi(stored.access_token);
+
+  // Shopify rejected the access token (revoked, or the app's scopes changed).
+  // Evict it and mint a replacement with token exchange: this request already
+  // carries a validated ID token, so nothing the merchant does is needed.
+  //
+  // Don't answer this with X-Shopify-Retry-Invalid-Session-Request. That header
+  // only makes App Bridge fetch a fresh *ID* token and replay this request — it
+  // never re-runs the exchange, so the replay would find no stored token and fail
+  // with "Not authenticated". It's the right answer for a rejected ID token, and
+  // the wrong one for a rejected access token.
   if (response.status === 401) {
-    delete tokenStore[usingOnline ? onlineKey : shop];
-    res.set('X-Shopify-Retry-Invalid-Session-Request', '1');
-    return res.status(401).json({error: 'Token rejected'});
+    const evictKey = usingOnline ? onlineKey : shop;
+    delete tokenStore[evictKey];
+
+    const result = await remintAccessToken({
+      idToken,
+      shop,
+      sub: payload.sub,
+      online: usingOnline,
+    });
+
+    // Only now is the retry header correct: the ID token itself is stale, and a
+    // fresh one lets the replayed request mint a token successfully.
+    if (result === 'invalid_id_token') {
+      res.set('X-Shopify-Retry-Invalid-Session-Request', '1');
+      return res.status(401).json({error: 'Invalid ID token'});
+    }
+    if (result !== 'minted') {
+      return res.status(502).json({error: 'Token exchange failed'});
+    }
+
+    response = await callAdminApi(tokenStore[evictKey].access_token);
+
+    // Retry once, not in a loop. A freshly minted token that's also rejected
+    // means something is wrong beyond a stale credential, so stop and tell the
+    // merchant to reauthorize rather than mint tokens indefinitely.
+    if (response.status === 401) {
+      delete tokenStore[evictKey];
+      return res.status(401).json({error: 'reauthenticate'});
+    }
   }
 
   res.json(await response.json());

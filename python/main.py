@@ -237,6 +237,64 @@ def exchange_online():
 
 
 # [START token-exchange.make-request]
+# Re-run token exchange for a token Shopify rejected, using the ID token that
+# came with the current request. Same request as /exchange/offline and
+# /exchange/online, minting whichever kind was rejected. The return value tells
+# the caller how to react:
+#   'minted'           — stored a new access token
+#   'invalid_id_token' — Shopify returned 400; the ID token is stale, and a fresh
+#                        one fixes it
+#   'failed'           — anything else; retrying with the same inputs won't help
+def remint_access_token(id_token, shop, sub, online):
+    data = {
+        'client_id': SHOPIFY_CLIENT_ID,
+        'client_secret': SHOPIFY_CLIENT_SECRET,
+        'grant_type': 'urn:ietf:params:oauth:grant-type:token-exchange',
+        'subject_token': id_token,
+        'subject_token_type': 'urn:ietf:params:oauth:token-type:id_token',
+        'requested_token_type': (
+            'urn:shopify:params:oauth:token-type:online-access-token'
+            if online
+            else 'urn:shopify:params:oauth:token-type:offline-access-token'
+        ),
+    }
+    # `expiring` only applies to offline tokens. An online token already expires
+    # with the staff member's session.
+    if not online:
+        data['expiring'] = '1'
+
+    try:
+        response = requests.post(
+            f'https://{shop}/admin/oauth/access_token',
+            headers={'Content-Type': 'application/x-www-form-urlencoded'},
+            data=data,
+            timeout=30,
+        )
+    except requests.RequestException:
+        return 'failed'
+
+    if response.status_code == 400:
+        return 'invalid_id_token'
+    if not response.ok:
+        return 'failed'
+
+    body = response.json()
+
+    if online:
+        token_store[f'{shop}:online:{sub}'] = {
+            'access_token': body['access_token'],
+            'expires_at': expires_at_from(body.get('expires_in')),
+        }
+    else:
+        token_store[shop] = {
+            'access_token': body['access_token'],
+            'refresh_token': body.get('refresh_token'),
+            'expires_at': expires_at_from(body.get('expires_in')),
+        }
+
+    return 'minted'
+
+
 @app.get('/api/shop')
 def api_shop():
     id_token = (request.headers.get('Authorization') or '').removeprefix('Bearer ')
@@ -287,23 +345,51 @@ def api_shop():
     if not stored:
         return jsonify({'error': 'Not authenticated'}), 401
 
-    response = requests.post(
-        f'https://{shop}/admin/api/2026-04/graphql.json',
-        headers={
-            'Content-Type': 'application/json',
-            'X-Shopify-Access-Token': stored['access_token'],
-        },
-        json={'query': '{ shop { name } }'},
-        timeout=30,
-    )
+    def call_admin_api(access_token):
+        return requests.post(
+            f'https://{shop}/admin/api/2026-04/graphql.json',
+            headers={
+                'Content-Type': 'application/json',
+                'X-Shopify-Access-Token': access_token,
+            },
+            json={'query': '{ shop { name } }'},
+            timeout=30,
+        )
 
-    # If Shopify rejects the token, evict the one we used and ask the client to
-    # retry with a fresh ID token rather than looping on a bad credential.
+    response = call_admin_api(stored['access_token'])
+
+    # Shopify rejected the access token (revoked, or the app's scopes changed).
+    # Evict it and mint a replacement with token exchange: this request already
+    # carries a validated ID token, so nothing the merchant does is needed.
+    #
+    # Don't answer this with X-Shopify-Retry-Invalid-Session-Request. That header
+    # only makes App Bridge fetch a fresh *ID* token and replay this request — it
+    # never re-runs the exchange, so the replay would find no stored token and fail
+    # with "Not authenticated". It's the right answer for a rejected ID token, and
+    # the wrong one for a rejected access token.
     if response.status_code == 401:
-        token_store.pop(online_key if using_online else shop, None)
-        error = jsonify({'error': 'Token rejected'})
-        error.headers['X-Shopify-Retry-Invalid-Session-Request'] = '1'
-        return error, 401
+        evict_key = online_key if using_online else shop
+        token_store.pop(evict_key, None)
+
+        result = remint_access_token(id_token, shop, payload['sub'], using_online)
+
+        # Only now is the retry header correct: the ID token itself is stale, and a
+        # fresh one lets the replayed request mint a token successfully.
+        if result == 'invalid_id_token':
+            error = jsonify({'error': 'Invalid ID token'})
+            error.headers['X-Shopify-Retry-Invalid-Session-Request'] = '1'
+            return error, 401
+        if result != 'minted':
+            return jsonify({'error': 'Token exchange failed'}), 502
+
+        response = call_admin_api(token_store[evict_key]['access_token'])
+
+        # Retry once, not in a loop. A freshly minted token that's also rejected
+        # means something is wrong beyond a stale credential, so stop and tell the
+        # merchant to reauthorize rather than mint tokens indefinitely.
+        if response.status_code == 401:
+            token_store.pop(evict_key, None)
+            return jsonify({'error': 'reauthenticate'}), 401
 
     return jsonify(response.json())
 # [END token-exchange.make-request]
