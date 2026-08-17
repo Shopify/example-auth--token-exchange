@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "node index.js",
-    "test": "echo \"No tests specified\""
+    "test": "node recovery.test.js"
   },
   "keywords": [
     "shopify",
