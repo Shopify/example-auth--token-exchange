@@ -98,6 +98,9 @@ function isAuthorizedTask(req) {
 //                   is expired, revoked, replayed outside the retry window, or the
 //                   app was uninstalled); the merchant must reinstall
 //   'retry'       — a transient failure (network, 5xx, 429); safe to retry later
+//   'failed'      — any other non-OK status, such as a malformed request or bad
+//                   client credentials; the same request fails the same way, so
+//                   surface it instead of hiding it behind the retry path
 async function refreshOfflineToken(shop) {
   const stored = tokenStore[shop];
   if (!stored?.refresh_token) return 'reauthorize';
@@ -126,7 +129,12 @@ async function refreshOfflineToken(shop) {
     delete tokenStore[shop];
     return 'reauthorize';
   }
-  if (!response.ok) return 'retry';
+  // Only a rate limit or a server fault is worth retrying. Treating every other
+  // non-OK status as transient would retry an unrecoverable refresh forever —
+  // a 400 for a malformed body, or a 403 for bad client credentials, returns the
+  // same response no matter how long you wait.
+  if (response.status === 429 || response.status >= 500) return 'retry';
+  if (!response.ok) return 'failed';
 
   const {access_token, refresh_token, expires_in} = await response.json();
   tokenStore[shop] = {
@@ -348,6 +356,12 @@ app.get('/api/shop', async (req, res) => {
       if (result === 'retry') {
         return res.status(503).json({error: 'Token refresh failed, try again'});
       }
+      if (result === 'failed') {
+        // Not transient and not the merchant's problem. Don't fall through — the
+        // stored token is about to expire, so the request below would go out with
+        // a credential that's already lapsing.
+        return res.status(502).json({error: 'Token refresh rejected'});
+      }
     }
   }
 
@@ -439,6 +453,11 @@ app.post('/refresh', async (req, res) => {
   }
   if (result === 'retry') {
     return res.status(502).json({error: 'Token refresh failed'});
+  }
+  if (result === 'failed') {
+    // Not transient: retrying sends the identical request. Answering with
+    // success here would tell the client it holds a fresh token when it doesn't.
+    return res.status(502).json({error: 'Token refresh rejected'});
   }
 
   res.json({success: true});

@@ -68,6 +68,9 @@ class FakeShopify:
         self.minted_tokens_work = True
         # Status for the token endpoint. 400 means the ID token is stale.
         self.exchange_status = 200
+        # Status for the refresh grant. 429 and 5xx are transient; any other
+        # non-OK status is not, and must not be retried.
+        self.refresh_status = 200
         # Status for the GraphQL Admin API when the token is accepted.
         self.api_status = 200
         self.expires_in = 86_400
@@ -130,6 +133,8 @@ class FakeShopify:
                 self.calls.append(
                     {'type': 'refresh', 'refresh_token': form['refresh_token']}
                 )
+                if self.refresh_status != 200:
+                    return FakeResponse({'error': 'invalid_request'}, self.refresh_status)
                 if form['refresh_token'] not in self.live_refresh_tokens:
                     return FakeResponse({'error': 'invalid_grant'}, 401)
                 # A refresh token is single use.
@@ -211,6 +216,17 @@ def call(method, path, shop):
         path,
         method=method,
         headers={'Authorization': f'Bearer {id_token_for(shop)}'},
+    )
+    return Result(response)
+
+
+# /refresh has no session to derive the shop from, so it authenticates with the
+# shared secret and takes the shop in the body instead of an ID token.
+def call_refresh(shop):
+    response = client.post(
+        '/refresh',
+        headers={'X-Refresh-Secret': 'test-refresh-secret'},
+        json={'shop': shop},
     )
     return Result(response)
 
@@ -389,6 +405,52 @@ def error_status_is_forwarded():
     assert len(shopify.calls_of_type('exchange')) == 1, (
         'a rate limit is not a credential problem, so do not re-mint'
     )
+
+
+@scenario('a non-transient refresh failure at expiry is surfaced, not retried')
+def non_transient_refresh_failure_at_expiry():
+    shop = fresh_shop()
+    shopify.expires_in = 30
+    assert call('POST', '/exchange/offline', shop).status == 200
+
+    # A malformed request or bad client credentials. Unlike a 5xx, waiting
+    # changes nothing: the identical request returns the identical response.
+    shopify.refresh_status = 400
+
+    result = call('GET', '/api/shop', shop)
+
+    assert result.status == 502, (
+        'a 400 from the token endpoint is not a "try again later" condition'
+    )
+    assert result.body == {'error': 'Token refresh rejected'}
+    assert len(shopify.calls_of_type('graphql')) == 0, (
+        'the refresh failed, so the about-to-expire token must not go out'
+    )
+
+    # The same route still treats a server fault as retryable, so the narrowing
+    # didn't collapse the two cases into one.
+    shopify.refresh_status = 503
+    transient = call('GET', '/api/shop', shop)
+    assert transient.status == 503
+    assert transient.body == {'error': 'Token refresh failed, try again'}
+
+
+@scenario('POST /refresh separates a non-transient failure from a retryable one')
+def refresh_route_separates_failure_kinds():
+    shop = fresh_shop()
+    assert call('POST', '/exchange/offline', shop).status == 200
+
+    # Bad client credentials or a malformed request. A background job reading
+    # "try again" here would retry on every run, forever.
+    shopify.refresh_status = 400
+    rejected = call_refresh(shop)
+    assert rejected.status != 200, 'a rejected refresh is not a success'
+    assert rejected.body == {'error': 'Token refresh rejected'}
+
+    # A server fault is still transient, so the caller is told to come back.
+    shopify.refresh_status = 503
+    transient = call_refresh(shop)
+    assert transient.body == {'error': 'Token refresh failed'}
 
 
 # ---------------------------------------------------------------------------

@@ -48,6 +48,9 @@ const shopify = {
   mintedTokensWork: true,
   // Status for the token endpoint. 400 means the ID token is stale.
   exchangeStatus: 200,
+  // Status for the refresh grant. 429 and 5xx are transient; any other non-OK
+  // status is not, and must not be retried.
+  refreshStatus: 200,
   // Status for the GraphQL Admin API when the token is accepted.
   apiStatus: 200,
   expiresIn: 86_400,
@@ -60,6 +63,7 @@ function resetShopify() {
   shopify.liveRefreshTokens.clear();
   shopify.mintedTokensWork = true;
   shopify.exchangeStatus = 200;
+  shopify.refreshStatus = 200;
   shopify.apiStatus = 200;
   shopify.expiresIn = 86_400;
   shopify.minted = [];
@@ -119,6 +123,9 @@ globalThis.fetch = async (url, options = {}) => {
 
     if (form.grant_type === 'refresh_token') {
       shopify.calls.push({type: 'refresh', refreshToken: form.refresh_token});
+      if (shopify.refreshStatus !== 200) {
+        return json({error: 'invalid_request'}, shopify.refreshStatus);
+      }
       if (!shopify.liveRefreshTokens.has(form.refresh_token)) {
         return json({error: 'invalid_grant'}, 401);
       }
@@ -185,6 +192,20 @@ async function call(method, path, shop) {
     retryHeader: response.headers.get('X-Shopify-Retry-Invalid-Session-Request'),
     body: await response.json(),
   };
+}
+
+// POST /refresh is the background-job entry point, so it authenticates with the
+// shared secret and takes the shop in the body rather than from an ID token.
+async function callRefresh(shop) {
+  const response = await realFetch(`${BASE}/refresh`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Refresh-Secret': 'test-refresh-secret',
+    },
+    body: JSON.stringify({shop}),
+  });
+  return {status: response.status, body: await response.json()};
 }
 
 function callsOfType(type) {
@@ -391,6 +412,60 @@ scenario(
       1,
       'a rate limit is not a credential problem, so do not re-mint',
     );
+  },
+);
+
+scenario(
+  'a non-transient refresh failure at expiry is surfaced, not retried',
+  async () => {
+    const shop = freshShop();
+    shopify.expiresIn = 30;
+    assert.equal((await call('POST', '/exchange/offline', shop)).status, 200);
+
+    // A malformed request or bad client credentials. Unlike a 5xx, waiting
+    // changes nothing: the identical request returns the identical response.
+    shopify.refreshStatus = 400;
+
+    const result = await call('GET', '/api/shop', shop);
+
+    assert.equal(
+      result.status,
+      502,
+      'a 400 from the token endpoint is not a "try again later" condition',
+    );
+    assert.deepEqual(result.body, {error: 'Token refresh rejected'});
+    assert.equal(
+      callsOfType('graphql').length,
+      0,
+      'the refresh failed, so the about-to-expire token must not go out',
+    );
+
+    // The same route still treats a server fault as retryable, so the narrowing
+    // didn't collapse the two cases into one.
+    shopify.refreshStatus = 503;
+    const transient = await call('GET', '/api/shop', shop);
+    assert.equal(transient.status, 503);
+    assert.deepEqual(transient.body, {error: 'Token refresh failed, try again'});
+  },
+);
+
+scenario(
+  'POST /refresh separates a non-transient failure from a retryable one',
+  async () => {
+    const shop = freshShop();
+    assert.equal((await call('POST', '/exchange/offline', shop)).status, 200);
+
+    // Bad client credentials or a malformed request. A background job reading
+    // "try again" here would retry on every run, forever.
+    shopify.refreshStatus = 400;
+    const rejected = await callRefresh(shop);
+    assert.notEqual(rejected.status, 200, 'a rejected refresh is not a success');
+    assert.deepEqual(rejected.body, {error: 'Token refresh rejected'});
+
+    // A server fault is still transient, so the caller is told to come back.
+    shopify.refreshStatus = 503;
+    const transient = await callRefresh(shop);
+    assert.deepEqual(transient.body, {error: 'Token refresh failed'});
   },
 );
 
