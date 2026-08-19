@@ -40,6 +40,17 @@ def index():
 # In-memory token store (use a persistent session store in production)
 token_store = {}
 
+# Shops whose Admin API calls must run under the acting staff member's own online
+# token. A real app knows this statically — it's a property of how the app is
+# built, not of what's in the store. This sample records it the first time
+# /exchange/online succeeds so both flows stay demonstrable.
+#
+# The point of tracking it at all: once an app needs per-user authorization, a
+# missing online token is a condition to recover from, never a reason to reach
+# for the shop-wide offline token. That substitution would run a low-privileged
+# staff member's request with the app's full access.
+per_user_authorization = set()
+
 
 # A valid expiring-token response includes expires_in (seconds until the access
 # token expires). Return None when it's absent or non-positive: treat the token
@@ -241,6 +252,11 @@ def exchange_online():
         'expires_at': expires_at_from(data.get('expires_in')),
     }
 
+    # This app authorizes Admin API calls per staff member for this shop from here
+    # on. /api/shop reads this and mints a replacement online token when one is
+    # missing, rather than borrowing the shop-wide offline token.
+    per_user_authorization.add(shop)
+
     return jsonify({'scope': data.get('scope')})
 # [END token-exchange.exchange-online]
 
@@ -318,16 +334,36 @@ def api_shop():
     shop = urlparse(payload['dest']).hostname
     online_key = f'{shop}:online:{payload["sub"]}'
 
-    # Drop an expired online token so we fall back to the offline token instead of
-    # sending a dead credential. Online tokens can't be refreshed — a new one is
-    # minted from a fresh ID token via /exchange/online.
+    # Drop an expired online token rather than sending a dead credential. Online
+    # tokens can't be refreshed — a new one is minted from a fresh ID token.
     online = token_store.get(online_key)
     if online and online.get('expires_at') is not None and online['expires_at'] <= time.time():
         token_store.pop(online_key, None)
 
-    # Prefer this staff member's online token so the request runs with their
-    # permissions; fall back to the shop-wide offline token for shop-level access.
-    using_online = online_key in token_store
+    # Which token authorizes this call is decided by how the app is built, not by
+    # what happens to be in the store. Deciding it by availability instead — the
+    # `token_store.get(online_key) or token_store.get(shop)` this used to do —
+    # means that whenever a staff member's online token is missing or expired, and
+    # online tokens expire at logout or after 24 hours, their request quietly goes
+    # out under the app's shop-wide offline token with the app's full scopes. The
+    # Admin API then enforces nothing about that user, so a staff member without
+    # permission for an action gets it anyway.
+    using_online = shop in per_user_authorization
+
+    # Per-user app, no usable online token for this staff member: mint one from the
+    # ID token this request already carries. This is the recovery the fallback was
+    # standing in for, and it costs one token exchange.
+    if using_online and online_key not in token_store:
+        result = remint_access_token(
+            id_token=id_token, shop=shop, sub=payload['sub'], online=True
+        )
+
+        if result == 'invalid_id_token':
+            error = jsonify({'error': 'Invalid ID token'})
+            error.headers['X-Shopify-Retry-Invalid-Session-Request'] = '1'
+            return error, 401
+        if result != 'minted':
+            return jsonify({'error': 'Token exchange failed'}), 502
 
     # Only the offline token is refreshable (online tokens are re-minted from a
     # fresh ID token via /exchange/online). Refresh it ~60 seconds before it
@@ -355,7 +391,9 @@ def api_shop():
                 # below would go out with a credential that's already lapsing.
                 return jsonify({'error': 'Token refresh rejected'}), 502
 
-    stored = token_store.get(online_key) or token_store.get(shop)
+    # No `or` fallback here on purpose: each mode reads only its own token, so a
+    # missing one is a 401 rather than a silent upgrade to broader access.
+    stored = token_store.get(online_key) if using_online else token_store.get(shop)
     if not stored:
         return jsonify({'error': 'Not authenticated'}), 401
 

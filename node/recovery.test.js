@@ -167,14 +167,16 @@ function freshShop() {
   return `recovery-${++shopCounter}.myshopify.com`;
 }
 
-function idTokenFor(shop) {
+// `sub` identifies the staff member. Override it to act as a second user in the
+// same shop, which is how the per-user authorization scenarios are written.
+function idTokenFor(shop, sub = USER_SUB) {
   const now = Math.floor(Date.now() / 1000);
   return jwt.sign(
     {
       iss: `https://${shop}/admin`,
       dest: `https://${shop}`,
       aud: CLIENT_ID,
-      sub: USER_SUB,
+      sub,
       exp: now + 60,
       nbf: now - 10,
     },
@@ -182,10 +184,10 @@ function idTokenFor(shop) {
   );
 }
 
-async function call(method, path, shop) {
+async function call(method, path, shop, sub = USER_SUB) {
   const response = await realFetch(`${BASE}${path}`, {
     method,
-    headers: {Authorization: `Bearer ${idTokenFor(shop)}`},
+    headers: {Authorization: `Bearer ${idTokenFor(shop, sub)}`},
   });
   return {
     status: response.status,
@@ -281,6 +283,45 @@ scenario(
 
     // The shop-wide offline token is untouched: eviction is keyed by staff member.
     assert.ok(shopify.liveAccessTokens.has(offline.token));
+  },
+);
+
+scenario(
+  'a second staff member gets their own online token, never the offline one',
+  async () => {
+    const shop = freshShop();
+    assert.equal((await call('POST', '/exchange/offline', shop)).status, 200);
+    assert.equal((await call('POST', '/exchange/online', shop)).status, 200);
+    const [offline] = shopify.minted;
+
+    // A different staff member opens the app. They have a valid ID token and no
+    // online token of their own, which is the condition the old
+    // `tokenStore[onlineKey] ?? tokenStore[shop]` fallback resolved by handing
+    // them the shop-wide offline token and its full app scopes.
+    const OTHER_SUB = '9999';
+    const result = await call('GET', '/api/shop', shop, OTHER_SUB);
+    assert.equal(result.status, 200);
+
+    const exchanges = callsOfType('exchange');
+    assert.equal(exchanges.length, 3, 'the app should mint a token for this user');
+    assert.equal(
+      exchanges[2].online,
+      true,
+      'a per-user app must mint an online token, not reuse the offline one',
+    );
+
+    const graphql = callsOfType('graphql');
+    assert.equal(graphql.length, 1);
+    assert.notEqual(
+      graphql[0].token,
+      offline.token,
+      "the second staff member's request must not go out under the offline token",
+    );
+    assert.equal(
+      graphql[0].token,
+      shopify.minted.at(-1).token,
+      'it should use the token just minted for this staff member',
+    );
   },
 );
 

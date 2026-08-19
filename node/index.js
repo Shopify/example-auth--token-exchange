@@ -31,6 +31,17 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 // In-memory token store (use a persistent session store in production)
 const tokenStore = {};
 
+// Shops whose Admin API calls must run under the acting staff member's own
+// online token. A real app knows this statically — it's a property of how the
+// app is built, not of what's in the store. This sample records it the first
+// time /exchange/online succeeds so both flows stay demonstrable.
+//
+// The point of tracking it at all: once an app needs per-user authorization,
+// a missing online token is a condition to recover from, never a reason to
+// reach for the shop-wide offline token. That substitution would run a
+// low-privileged staff member's request with the app's full access.
+const perUserAuthorization = new Set();
+
 // A valid expiring-token response includes expires_in (seconds until the access
 // token expires). Return null when it's absent or non-positive: treat the token
 // as non-expiring and never refresh it. Storing Date.now() instead would make
@@ -257,6 +268,11 @@ app.post('/exchange/online', async (req, res) => {
     expires_at: expiresAtFrom(expires_in),
   };
 
+  // This app authorizes Admin API calls per staff member for this shop from here
+  // on. /api/shop reads this and mints a replacement online token when one is
+  // missing, rather than borrowing the shop-wide offline token.
+  perUserAuthorization.add(shop);
+
   res.json({scope});
 });
 // [END token-exchange.exchange-online]
@@ -327,17 +343,42 @@ app.get('/api/shop', async (req, res) => {
   const shop = new URL(payload.dest).hostname;
   const onlineKey = `${shop}:online:${payload.sub}`;
 
-  // Drop an expired online token so we fall back to the offline token instead of
-  // sending a dead credential. Online tokens can't be refreshed — a new one is
-  // minted from a fresh ID token via /exchange/online.
+  // Drop an expired online token rather than sending a dead credential. Online
+  // tokens can't be refreshed — a new one is minted from a fresh ID token.
   const online = tokenStore[onlineKey];
   if (online?.expires_at && online.expires_at <= Date.now()) {
     delete tokenStore[onlineKey];
   }
 
-  // Prefer this staff member's online token so the request runs with their
-  // permissions; fall back to the shop-wide offline token for shop-level access.
-  const usingOnline = Boolean(tokenStore[onlineKey]);
+  // Which token authorizes this call is decided by how the app is built, not by
+  // what happens to be in the store. Deciding it by availability instead — the
+  // `tokenStore[onlineKey] ?? tokenStore[shop]` this used to do — means that
+  // whenever a staff member's online token is missing or expired, and online
+  // tokens expire at logout or after 24 hours, their request quietly goes out
+  // under the app's shop-wide offline token with the app's full scopes. The
+  // Admin API then enforces nothing about that user, so a staff member without
+  // permission for an action gets it anyway.
+  const usingOnline = perUserAuthorization.has(shop);
+
+  // Per-user app, no usable online token for this staff member: mint one from
+  // the ID token this request already carries. This is the recovery the fallback
+  // was standing in for, and it costs one token exchange.
+  if (usingOnline && !tokenStore[onlineKey]) {
+    const result = await remintAccessToken({
+      idToken,
+      shop,
+      sub: payload.sub,
+      online: true,
+    });
+
+    if (result === 'invalid_id_token') {
+      res.set('X-Shopify-Retry-Invalid-Session-Request', '1');
+      return res.status(401).json({error: 'Invalid ID token'});
+    }
+    if (result !== 'minted') {
+      return res.status(502).json({error: 'Token exchange failed'});
+    }
+  }
 
   // Only the offline token is refreshable (online tokens are re-minted from a
   // fresh ID token via /exchange/online). Refresh it ~60 seconds before it
@@ -365,7 +406,9 @@ app.get('/api/shop', async (req, res) => {
     }
   }
 
-  const stored = tokenStore[onlineKey] ?? tokenStore[shop];
+  // No `??` here on purpose: each mode reads only its own token, so a missing
+  // one is a 401 rather than a silent upgrade to broader access.
+  const stored = usingOnline ? tokenStore[onlineKey] : tokenStore[shop];
   if (!stored) return res.status(401).json({error: 'Not authenticated'});
 
   const callAdminApi = (accessToken) =>
