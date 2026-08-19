@@ -186,14 +186,16 @@ def fresh_shop():
     return f'recovery-{_shop_counter}.myshopify.com'
 
 
-def id_token_for(shop):
+# `sub` identifies the staff member. Override it to act as a second user in the
+# same shop, which is how the per-user authorization scenario is written.
+def id_token_for(shop, sub=USER_SUB):
     now = int(time.time())
     return jwt.encode(
         {
             'iss': f'https://{shop}/admin',
             'dest': f'https://{shop}',
             'aud': CLIENT_ID,
-            'sub': USER_SUB,
+            'sub': sub,
             'exp': now + 60,
             'nbf': now - 10,
         },
@@ -211,11 +213,11 @@ class Result:
         self.body = json.loads(response.get_data(as_text=True))
 
 
-def call(method, path, shop):
+def call(method, path, shop, sub=USER_SUB):
     response = client.open(
         path,
         method=method,
-        headers={'Authorization': f'Bearer {id_token_for(shop)}'},
+        headers={'Authorization': f'Bearer {id_token_for(shop, sub)}'},
     )
     return Result(response)
 
@@ -298,6 +300,37 @@ def revoked_online_token_recovers_as_online():
 
     # The shop-wide offline token is untouched: eviction is keyed by staff member.
     assert offline['token'] in shopify.live_access_tokens
+
+
+@scenario('a second staff member gets their own online token, never the offline one')
+def second_staff_member_never_uses_offline_token():
+    shop = fresh_shop()
+    assert call('POST', '/exchange/offline', shop).status == 200
+    assert call('POST', '/exchange/online', shop).status == 200
+    offline = shopify.minted[0]
+
+    # A different staff member opens the app. They have a valid ID token and no
+    # online token of their own, which is the condition the old
+    # `token_store.get(online_key) or token_store.get(shop)` fallback resolved by
+    # handing them the shop-wide offline token and its full app scopes.
+    other_sub = '9999'
+    result = call('GET', '/api/shop', shop, other_sub)
+    assert result.status == 200, result.status
+
+    exchanges = shopify.calls_of_type('exchange')
+    assert len(exchanges) == 3, 'the app should mint a token for this user'
+    assert exchanges[2]['online'] is True, (
+        'a per-user app must mint an online token, not reuse the offline one'
+    )
+
+    graphql = shopify.calls_of_type('graphql')
+    assert len(graphql) == 1
+    assert graphql[0]['token'] != offline['token'], (
+        "the second staff member's request must not go out under the offline token"
+    )
+    assert graphql[0]['token'] == shopify.minted[-1]['token'], (
+        'it should use the token just minted for this staff member'
+    )
 
 
 @scenario('a replacement token that Shopify also rejects stops after one retry')
